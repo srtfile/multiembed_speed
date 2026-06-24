@@ -1,0 +1,101 @@
+name: resolve-embeds
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Space-separated embed URLs to resolve"
+        required: false
+        default: "https://multiembed.mov/?video_id=280&tmdb=1"
+      video_id:
+        description: "Shorthand: multiembed video_id (tmdb=1 assumed)"
+        required: false
+      output_artifact:
+        description: "Upload results as artifact? (true/false)"
+        required: false
+        default: "true"
+
+  schedule:
+    # runs daily at 04:00 UTC — edit or remove as needed
+    - cron: "0 4 * * *"
+
+  push:
+    branches: [main]
+    paths:
+      - "fast_embed.py"
+      - ".github/workflows/resolve-embeds.yml"
+
+jobs:
+  resolve:
+    name: Resolve embed URLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── repo ────────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── python ──────────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── dep cache ───────────────────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-aiohttp-uvloop
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install --upgrade aiohttp uvloop
+
+      # ── build URL list ───────────────────────────────────────────────────────
+      - name: Build URL list
+        id: urls
+        run: |
+          URLS="${{ github.event.inputs.urls }}"
+          VID="${{ github.event.inputs.video_id }}"
+          if [ -n "$VID" ]; then
+            URLS="https://multiembed.mov/?video_id=${VID}&tmdb=1 $URLS"
+          fi
+          # trim and deduplicate, fallback to default if empty
+          URLS=$(echo "$URLS" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
+          [ -z "$URLS" ] && URLS="https://multiembed.mov/?video_id=280&tmdb=1"
+          echo "list=$URLS" >> "$GITHUB_OUTPUT"
+          echo "Resolving: $URLS"
+
+      # ── resolve ──────────────────────────────────────────────────────────────
+      - name: Resolve embeds
+        run: |
+          python fast_embed.py ${{ steps.urls.outputs.list }} \
+            --output results.json
+        continue-on-error: true   # don't fail the job on partial errors
+
+      # ── print summary ────────────────────────────────────────────────────────
+      - name: Print summary
+        run: |
+          echo "## Embed Resolution Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat results.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat results.json
+
+      # ── artifact upload ──────────────────────────────────────────────────────
+      - name: Upload results
+        if: ${{ github.event.inputs.output_artifact != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: embed-results-${{ github.run_id }}
+          path: results.json
+          retention-days: 7
+
+      # ── push results back to repo (optional, comment out if unwanted) ────────
+      # - name: Commit results
+      #   uses: stefanzweifel/git-auto-commit-action@v5
+      #   with:
+      #     commit_message: "ci: embed results [${{ github.run_id }}]"
+      #     file_pattern: results.json
