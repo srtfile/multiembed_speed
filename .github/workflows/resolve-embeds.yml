@@ -3,12 +3,12 @@ name: resolve-embeds
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: "Space-separated embed URLs to resolve"
+      video_ids:
+        description: "Space-separated multiembed video_ids  e.g.  280 550 12345"
         required: false
-        default: "https://multiembed.mov/?video_id=280&tmdb=1"
-      video_id:
-        description: "Shorthand: multiembed video_id (tmdb=1 assumed)"
+        default: "280"
+      raw_urls:
+        description: "Extra raw URLs (newline-safe, one per line)"
         required: false
       output_artifact:
         description: "Upload results as artifact? (true/false)"
@@ -16,7 +16,6 @@ on:
         default: "true"
 
   schedule:
-    # runs daily at 04:00 UTC — edit or remove as needed
     - cron: "0 4 * * *"
 
   push:
@@ -32,17 +31,14 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      # ── repo ────────────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── python ──────────────────────────────────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # ── dep cache ───────────────────────────────────────────────────────────
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -53,29 +49,43 @@ jobs:
       - name: Install dependencies
         run: pip install --upgrade aiohttp uvloop
 
-      # ── build URL list ───────────────────────────────────────────────────────
-      - name: Build URL list
-        id: urls
+      # Write URLs to a file — avoids ALL shell quoting/ampersand issues
+      - name: Build urls.txt
         run: |
-          URLS="${{ github.event.inputs.urls }}"
-          VID="${{ github.event.inputs.video_id }}"
-          if [ -n "$VID" ]; then
-            URLS="https://multiembed.mov/?video_id=${VID}&tmdb=1 $URLS"
-          fi
-          # trim and deduplicate, fallback to default if empty
-          URLS=$(echo "$URLS" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
-          [ -z "$URLS" ] && URLS="https://multiembed.mov/?video_id=280&tmdb=1"
-          echo "list=$URLS" >> "$GITHUB_OUTPUT"
-          echo "Resolving: $URLS"
+          python - << 'EOF'
+          import os
 
-      # ── resolve ──────────────────────────────────────────────────────────────
+          ids  = os.environ.get("VIDEO_IDS", "280").split()
+          raw  = os.environ.get("RAW_URLS", "")
+
+          lines = []
+          for vid in ids:
+              vid = vid.strip()
+              if vid:
+                  lines.append(f"https://multiembed.mov/?video_id={vid}&tmdb=1")
+          for u in raw.splitlines():
+              u = u.strip()
+              if u:
+                  lines.append(u)
+
+          if not lines:
+              lines.append("https://multiembed.mov/?video_id=280&tmdb=1")
+
+          with open("urls.txt", "w") as f:
+              f.write("\n".join(lines) + "\n")
+
+          print("URLs to resolve:")
+          for l in lines:
+              print(" ", l)
+          EOF
+        env:
+          VIDEO_IDS: ${{ github.event.inputs.video_ids }}
+          RAW_URLS:  ${{ github.event.inputs.raw_urls }}
+
       - name: Resolve embeds
-        run: |
-          python fast_embed.py ${{ steps.urls.outputs.list }} \
-            --output results.json
-        continue-on-error: true   # don't fail the job on partial errors
+        run: python fast_embed.py --urls-file urls.txt --output results.json
+        continue-on-error: true
 
-      # ── print summary ────────────────────────────────────────────────────────
       - name: Print summary
         run: |
           echo "## Embed Resolution Results" >> "$GITHUB_STEP_SUMMARY"
@@ -84,7 +94,6 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat results.json
 
-      # ── artifact upload ──────────────────────────────────────────────────────
       - name: Upload results
         if: ${{ github.event.inputs.output_artifact != 'false' }}
         uses: actions/upload-artifact@v4
@@ -92,10 +101,3 @@ jobs:
           name: embed-results-${{ github.run_id }}
           path: results.json
           retention-days: 7
-
-      # ── push results back to repo (optional, comment out if unwanted) ────────
-      # - name: Commit results
-      #   uses: stefanzweifel/git-auto-commit-action@v5
-      #   with:
-      #     commit_message: "ci: embed results [${{ github.run_id }}]"
-      #     file_pattern: results.json
